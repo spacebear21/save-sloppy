@@ -3,7 +3,7 @@ use axum::Router;
 use clap::{Arg, Command};
 use sloppy::Sloppy;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 pub mod nostr;
 pub mod sloppy;
 pub mod unleashed;
@@ -95,4 +95,18 @@ fn get_last_log_entry() -> io::Result<Option<String>> {
 
     let last_line = reader.lines().filter_map(Result::ok).last();
     Ok(last_line)
+}
+
+fn save_to_file(filename: &str, content: &str) -> io::Result<()> {
+    let mut file = File::create(filename)?;
+    file.write_all(content.as_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
+fn read_from_file(filename: &str) -> io::Result<String> {
+    let mut file = File::open(filename)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
 }

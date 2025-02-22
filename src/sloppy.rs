@@ -8,7 +8,7 @@ use tokio::time;
 
 use crate::nostr::publish_on_nostr;
 use crate::unleashed::{CampaignResponse, UnleashedClient};
-use crate::{get_last_log_entry, save_to_log};
+use crate::{get_last_log_entry, read_from_file, save_to_file, save_to_log};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletState {
@@ -50,6 +50,7 @@ impl Sloppy {
 
     // Fetch latest balances and update the wallet state
     async fn refresh_wallet(&mut self, nwc: &NWC) -> Result<(), nwc::Error> {
+        println!("refreshing wallet");
         self.wallet.lightning_balance = self.get_lightning_balance(nwc).await?;
         Ok(())
     }
@@ -66,20 +67,26 @@ impl Sloppy {
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Implement LLM API call with context
         println!("Generating fundraising post");
-        let completion = ai_client
-            .ask_llm("{\"past_campaigns\": [\"\"], \"developer_responses\": \"You asked what we can do to improve responses. Maybe consider what you want out of this situation. Also, there are limited funds right now.\"}")
-            .await?;
+        let content = match read_from_file("last_campaign") {
+            Ok(content) => content,
+            Err(_) => "Help keep me alive! I'm an AI with a unique personality named Sloppy. I need your support to continue providing creative and entertaining responses. Please donate Bitcoin to help pay for my server time. Every little bit counts, and together we can make sure that Sloppy stays up and running. Thanks for your generosity!".into(),
+        };
+        println!("Prev campaign: {}", &content);
+        let completion = ai_client.ask_llm(&content).await?;
         Ok(completion)
     }
 
     async fn publish_post(&self, content: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Implement social media API integration
         publish_on_nostr(content).await?;
+        save_to_file("last_campaign", content)?;
         println!("Published post!");
+        println!("{}", content);
         Ok(())
     }
 
     async fn monitor_donations(&mut self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        println!("Monitoring donations");
         let nwc_uri = std::env::var("NWC_URI")?;
         let uri = NostrWalletConnectURI::parse(nwc_uri)?;
         let nwc = NWC::new(uri);
@@ -152,7 +159,8 @@ impl Sloppy {
             //self.update_fundraising_history(metrics).await?;
 
             // Wait before next iteration
-            time::sleep(Duration::from_secs(15)).await; // 24 hours
+            println!("Sleeping...");
+            time::sleep(Duration::from_secs(15)).await;
         }
     }
 }
