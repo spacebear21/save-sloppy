@@ -1,7 +1,7 @@
 use nostr_sdk::prelude::*;
 use std::error::Error;
 
-pub async fn publish_on_nostr(note: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn publish_on_nostr(note: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     // Or use your already existing (from hex or bech32)
     let nostr_seckey = std::env::var("NOSTR_SECKEY")?;
     let keys = Keys::parse(&nostr_seckey)?;
@@ -57,6 +57,10 @@ pub async fn publish_on_nostr(note: &str) -> Result<(), Box<dyn Error + Send + S
     let builder = EventBuilder::text_note(note).pow(20);
     client.send_event_builder(builder).await?; // Send to all relays
                                                // client.send_event_builder_to(["wss://relay.damus.io"], builder).await?; // Send to specific relay
+    let created_at = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs();
+    let created_at = format!("{}", created_at);
 
-    Ok(())
+    Ok(created_at)
 }

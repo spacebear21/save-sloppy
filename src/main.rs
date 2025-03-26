@@ -2,14 +2,29 @@ use anyhow::Result;
 use axum::Router;
 use clap::{Arg, Command};
 use sloppy::Sloppy;
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Connection, Database, Executor, Pool, Sqlite, SqliteConnection, SqlitePool};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::Arc;
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 pub mod nostr;
 pub mod sloppy;
 pub mod unleashed;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let subscriber = FmtSubscriber::builder()
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::TRACE)
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     // let matches = Command::new("saving-sloppy")
     //     .version("1.0")
     //     .arg(
@@ -38,12 +53,18 @@ async fn main() -> Result<()> {
     //     }
     // }
 
+    let db_filename = "db.sqlite";
+
+    let pool: SqlitePool = SqlitePoolOptions::new().connect(db_filename).await?;
+
+    let initialized_pool = InitializedPool::new(pool).await?;
+
     let app = Router::new().route("/", axum::routing::get(|| async { "Hello, World!" }));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 
     let server_task = tokio::spawn(async move { axum::serve(listener, app).await });
 
-    let mut sloppy = Sloppy::new().await;
+    let mut sloppy = Sloppy::new(initialized_pool.clone()).await;
     let sloppy_task = tokio::spawn(async move { sloppy.run_survival_loop().await });
 
     tokio::select! {
@@ -109,4 +130,43 @@ fn read_from_file(filename: &str) -> io::Result<String> {
     let mut content = String::new();
     file.read_to_string(&mut content)?;
     Ok(content)
+}
+
+#[derive(Clone)]
+pub struct InitializedPool {
+    pool: Pool<Sqlite>,
+}
+
+impl InitializedPool {
+    #[tracing::instrument]
+    pub async fn new(pool: Pool<Sqlite>) -> Result<InitializedPool> {
+        // Initialize db tables
+        let mut conn = pool.acquire().await?;
+
+        // Using "query" (instead of `query!`) to avoid the sql checking that sqlx performs
+        let x = sqlx::query(
+        "CREATE TABLE IF NOT EXISTS campaign (id INTEGER PRIMARY KEY, text TEXT, created_at TEXT)",
+        )
+            .execute(conn.as_mut())
+            .await?;
+        info!("attempted to create table during pool initialization: {x:?}");
+
+        let z = InitializedPool { pool };
+        Ok(z)
+    }
+}
+
+impl std::ops::Deref for InitializedPool {
+    type Target = Pool<Sqlite>;
+    fn deref(&self) -> &Self::Target {
+        &self.pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_hello_world() {
+        insta::assert_debug_snapshot!(vec![1, 2, 3]);
+    }
 }

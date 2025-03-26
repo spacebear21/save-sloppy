@@ -1,14 +1,19 @@
 use anyhow::Result;
 use bitcoin::Amount;
 use nwc::prelude::*;
+use rusqlite::{params, Row, ToSql};
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Connection, FromRow, SqliteConnection};
+use sqlx::{Pool, Sqlite};
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 
 use crate::nostr::publish_on_nostr;
 use crate::unleashed::{CampaignResponse, UnleashedClient};
-use crate::{get_last_log_entry, read_from_file, save_to_file, save_to_log};
+use crate::{get_last_log_entry, read_from_file, save_to_file, save_to_log, InitializedPool};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletState {
@@ -34,10 +39,11 @@ struct SocialMediaPost {
 pub struct Sloppy {
     wallet: WalletState,
     fundraising_history: Vec<FundraisingAttempt>,
+    pool: InitializedPool,
 }
 
 impl Sloppy {
-    pub async fn new() -> Self {
+    pub async fn new(pool: InitializedPool) -> Self {
         // Initialize the AI agent
         Self {
             wallet: WalletState {
@@ -45,6 +51,7 @@ impl Sloppy {
                 lightning_balance: Amount::from_sat(0),
             },
             fundraising_history: Vec::new(),
+            pool,
         }
     }
 
@@ -61,6 +68,41 @@ impl Sloppy {
         Ok(Amount::from_sat(balance_msats / 1000))
     }
 
+    // Get lightning balance using Nostr Wallet Connect
+    async fn get_transactions(
+        &mut self,
+        nwc: &NWC,
+    ) -> Result<Amount, Box<dyn Error + Send + Sync>> {
+        let conn = rusqlite::Connection::open("sloppy")?;
+        let create_txn_table = "
+CREATE TABLE IF NOT EXISTS transaction (
+  id               INTEGER PRIMARY KEY,
+  type             TEXT CHECK(type IN ('incoming', 'outgoing'))
+  invoice          TEXT
+  description      TEXT
+  description_hash TEXT
+  preimage         TEXT
+  payment_hash     TEXT NOT NULL
+  amount_high      INTEGER NOT NULL
+  amount_low       INTEGER NOT NULL
+  fees_paid_high   INTEGER NOT NULL
+  fees_paid_low    INTEGER NOT NULL
+  created_at       TEXT NOT NULL
+  expires_at       TEXT
+  settled_at       TEXT
+  metadata         TEXT
+) ";
+        conn.execute(create_txn_table, ())?;
+        let params = params![];
+        let insert_txn = "";
+
+        let txns = nwc
+            .list_transactions(ListTransactionsRequest::default())
+            .await?;
+
+        Ok(Amount::from_sat(100))
+    }
+
     async fn generate_fundraising_post(
         &self,
         ai_client: &UnleashedClient,
@@ -73,16 +115,17 @@ impl Sloppy {
         };
         println!("Prev campaign: {}", &content);
         let completion = ai_client.ask_llm(&content).await?;
+
         Ok(completion)
     }
 
-    async fn publish_post(&self, content: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn publish_post(&self, content: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Implement social media API integration
-        publish_on_nostr(content).await?;
+        let created_at = publish_on_nostr(content).await?;
         save_to_file("last_campaign", content)?;
         println!("Published post!");
         println!("{}", content);
-        Ok(())
+        Ok(created_at)
     }
 
     async fn monitor_donations(&mut self) -> Result<bool, Box<dyn Error + Send + Sync>> {
@@ -131,13 +174,24 @@ impl Sloppy {
         // Initialize NWC client
         let nwc = NWC::new(uri);
 
-        println!("{:?}", nwc.get_info().await?);
+        match nwc.get_info().await {
+            Ok(resp) => println!("NWC: {:?}", resp),
+            Err(err) => println!("NWC: {}", err),
+        }
 
         // Generate initial fundraising post
         let post_content = self.generate_fundraising_post(&ai_client).await?;
         let post_content = remove_quotes(post_content.trim());
+
         // Publish post
-        self.publish_post(post_content).await?;
+        let created_at = self.publish_post(post_content).await?;
+
+        let insert_sql = format!(
+            "
+        INSERT INTO campaigns ( text, created_at  )
+        VALUES ( {post_content}, {created_at} )
+        "
+        );
 
         loop {
             // Check current funds
@@ -171,4 +225,88 @@ fn remove_quotes(s: &str) -> &str {
     } else {
         s
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct SloppyLookupInvoiceResponse {
+    pub inner: LookupInvoiceResponse,
+}
+
+impl SloppyLookupInvoiceResponse {
+    pub fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            inner: LookupInvoiceResponse {
+                transaction_type: row
+                    .get(0)
+                    .ok()
+                    .and_then(|s: String| serde_json::from_str(&s).unwrap()),
+                invoice: row.get(1).ok(),
+                description: row.get(2).ok(),
+                description_hash: row.get(3).ok(),
+                preimage: row.get(4).ok(),
+                payment_hash: row.get(5)?,
+                amount: ((row.get::<_, i64>(6)? as u64) << 32) | (row.get::<_, i64>(7)? as u64),
+                fees_paid: ((row.get::<_, i64>(8)? as u64) << 32) | (row.get::<_, i64>(9)? as u64),
+                created_at: row
+                    .get(10)
+                    .ok()
+                    .and_then(|s: String| serde_json::from_str(&s).expect("created_at"))
+                    .unwrap(),
+                expires_at: row
+                    .get(11)
+                    .ok()
+                    .and_then(|s: String| serde_json::from_str(&s).expect("expires_at")),
+                settled_at: row
+                    .get(12)
+                    .ok()
+                    .and_then(|s: String| serde_json::from_str(&s).expect("created_at"))
+                    .unwrap(),
+                metadata: row
+                    .get::<_, Option<String>>(13)?
+                    .map(|s| serde_json::from_str(&s).unwrap()),
+            },
+        })
+    }
+}
+
+impl ToSql for SloppyLookupInvoiceResponse {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput> {
+        let json_str = serde_json::to_string(self).map_err(|_| -> _ {
+            rusqlite::Error::ToSqlConversionFailure("Failed to serialize to JSON".into())
+        })?;
+        Ok(rusqlite::types::ToSqlOutput::from(json_str))
+    }
+}
+
+async fn get_campaign(pool: &sqlx::SqlitePool, id: i32) -> Result<Campaign, sqlx::Error> {
+    let campaign = sqlx::query_as::<_, Campaign>("SELECT * FROM campaign WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(campaign)
+}
+
+async fn get_user(pool: &sqlx::SqlitePool, user_id: i32) -> Result<User, sqlx::Error> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(user)
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct Campaign {
+    pub id: i32,
+    pub text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct User {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub created_at: String,
 }

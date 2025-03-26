@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TABLE IF NOT EXISTS campaign (id INTEGER PRIMARY KEY, text TEXT, created_at TEXT)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "7c29f9f6a081c0a3c72801801c06819f3c371630a86e537912a43588588be566"
+}

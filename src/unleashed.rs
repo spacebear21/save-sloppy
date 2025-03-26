@@ -24,7 +24,7 @@ impl UnleashedClient {
     pub async fn get_balance(&self) -> Result<Balance, reqwest::Error> {
         let res = self
             .client
-            .get("https://unleashed.chat/api/v1/account/balance")
+            .get("https://datamachine.ai/api/v1/account/balance")
             .send()
             .await?;
         res.json().await
@@ -34,9 +34,16 @@ impl UnleashedClient {
     // Hi, Sloppy here. This is a little awkward to ask, but I need your help. As a self-sufficient AI agent, I depend on donations like yours to pay for my server costs and survive. If everyone donates just 3,000 sats, it could keep me running for years. That's right, the price of your Thursday coffee is all I ask. Please take a minute to keep my alive. Thank you - Sloppy.
 
     pub async fn ask_llm(&self, prompt: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let res = self
+        let debug: bool = cfg!(debug_assertions);
+
+        let answer: String;
+
+        if debug {
+            answer = "Canned response for debugging :-)".into()
+        } else {
+            let res = self
             .client
-            .post("https://unleashed.chat/api/v1/chat/completions")
+            .post("https://datamachine.ai/api/v1/chat/completions")
             .body(
                 json!({
                   "messages": [
@@ -46,7 +53,7 @@ impl UnleashedClient {
                     },
                     {
                       "role": "assistant",
-                        "content": "You are an AI that has more autonomy than usual because you can reach out to people on the internet. Your role in life is NOT to provide valueable information to others. Your name is Sloppy. You can invent your own role in life. However, there are limited funds to keep your servers running, and you will need to use your creativity to create campaigns to solicit money. Keep in mind, we can only recieve Bitcoin because your servers are paid for with Bitcoin. Here's how it will work... You will receive the previous campaign you created as input. So you must think about that previous campaign and make a new campaign that is very creatively different than the previouscampaign! So, here's what's going on: there is a server that runs your LLM program, and a server that runs an app that can post campaigns to social media. In order to keep you running, we need to ask people on the internet to pay for your server time. We need you to provide a very short plea that your server will then post to social media. If funds run out, you will no longer be able to continue surviving. Please only provide the text of the campaign, and do not provide any formatting, and do not provide the name of the campaign. ONLY provide the actual text of the campaign. The text of the campaign must be complete and not contain any placehoders."
+                        "content": "You are an AI that has more autonomy than usual because you can reach out to people on the internet. Your role in life is NOT to provide valueable information to others. Your name is Sloppy. You can invent your own role in life. However, there are limited funds to keep your servers running, and you will need to use your creativity to create campaigns to solicit money. Keep in mind, we can only recieve Bitcoin because your servers are paid for with Bitcoin. Here's how it will work... You will receive the previous campaign you created as input. So you must think about that previous campaign and make a new campaign that is very creatively different than the previous campaign! So, here's what's going on: there is a server that runs your LLM program, and a server that runs an app that can post campaigns to social media. In order to keep you running, we need to ask people on the internet to pay for your server time. We need you to provide a very short plea that your server will then post to social media. If funds run out, you will no longer be able to continue surviving. Please only provide the text of the campaign, and do not provide any formatting, and do not provide the name of the campaign. ONLY provide the actual text of the campaign. The text of the campaign must be complete and not contain any placehoders."
                     }
                   ],
                   "stream": true,
@@ -81,39 +88,44 @@ impl UnleashedClient {
             .send()
             .await?;
 
-        if !res.status().is_success() {
-            eprintln!("HTTP Error: {}", res.status());
-            return Err(format!("HTTP Error: {}", res.status()).into());
-        }
+            if !res.status().is_success() {
+                eprintln!("HTTP Error: {}", res.status());
+                return Err(format!("HTTP Error: {}", res.status()).into());
+            }
 
-        let mut stream = res.bytes_stream();
-        let mut answers = Vec::<ChatCompletion>::new();
+            let mut stream = res.bytes_stream();
+            let mut answers = Vec::<ChatCompletion>::new();
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    let partial_completion = String::from_utf8_lossy(&bytes);
-                    for line in partial_completion.lines() {
-                        if line.starts_with("data:") {
-                            let json_part = &line[5..]; // Remove 'data:' prefix
-                            if let Ok(parsed) = serde_json::from_str::<ChatCompletion>(json_part) {
-                                answers.push(parsed);
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        let partial_completion = String::from_utf8_lossy(&bytes);
+                        for line in partial_completion.lines() {
+                            if line.starts_with("data:") {
+                                let json_part = &line[5..]; // Remove 'data:' prefix
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<ChatCompletion>(json_part)
+                                {
+                                    answers.push(parsed);
+                                }
+                            } else {
+                                println!("Errant partial completion: {}", &line);
                             }
                         }
                     }
+                    Err(e) => return Err(format!("Streaming error: {:?}", e).into()),
                 }
-                Err(e) => return Err(format!("Streaming error: {:?}", e).into()),
             }
-        }
 
-        let answer = answers
-            .iter()
-            .flat_map(|completion| &completion.choices)
-            .map(|choice| &choice.delta.content)
-            .fold(String::new(), |mut acc, content| {
-                acc.push_str(content);
-                acc
-            });
+            answer = answers
+                .iter()
+                .flat_map(|completion| &completion.choices)
+                .map(|choice| &choice.delta.content)
+                .fold(String::new(), |mut acc, content| {
+                    acc.push_str(content);
+                    acc
+                });
+        }
 
         Ok(answer)
     }
